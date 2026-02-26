@@ -10,6 +10,7 @@ enum Error {
     OutDir(env::VarError),
     InvalidUserHooksDir(PathBuf),
     EmptyUserHook(PathBuf),
+    InsideWorktree,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -40,8 +41,53 @@ impl fmt::Debug for Error {
                 format!("User hooks directory is not found or no executable file is found in '{:?}'. Did you forget to make a hook script executable?", path)
 	        }
             Error::EmptyUserHook(path) => format!("User hook script is empty: {:?}", path),
+            Error::InsideWorktree => {
+                "cargo-husky: Git hooks cannot be installed in a worktree. \
+                 Please build from the main checkout to install/update hooks."
+                    .to_string()
+            }
         };
         write!(f, "{}", msg)
+    }
+}
+
+/// Check if the build is running inside a git worktree.
+///
+/// A git worktree has a `.git` file (not directory) that points to the main
+/// repository's `.git/worktrees/<name>` directory. We detect this by walking
+/// up from OUT_DIR looking for a `.git` entry that is a file rather than a
+/// directory.
+fn is_inside_worktree() -> bool {
+    // Check env vars that indicate worktree usage
+    if var_os("GIT_WORK_TREE").is_some() {
+        return true;
+    }
+
+    // Walk up from OUT_DIR looking for a .git file (not directory)
+    let dir = match env::var("OUT_DIR") {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    let mut dir = PathBuf::from(dir);
+    if !dir.has_root() {
+        dir = match fs::canonicalize(&dir) {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+    }
+    loop {
+        let gitpath = dir.join(".git");
+        if gitpath.is_file() {
+            // .git is a file, which means this is a worktree
+            return true;
+        }
+        if gitpath.is_dir() {
+            // .git is a real directory, this is the main checkout
+            return false;
+        }
+        if !dir.pop() {
+            return false;
+        }
     }
 }
 
@@ -313,6 +359,15 @@ fn install() -> Result<()> {
 fn main() -> Result<()> {
     if var_os("CARGO_HUSKY_DONT_INSTALL_HOOKS").is_some() {
         eprintln!("Warning: Found '$CARGO_HUSKY_DONT_INSTALL_HOOKS' in env, not doing anything!");
+        return Ok(());
+    }
+
+    if is_inside_worktree() {
+        eprintln!(
+            "cargo-husky: Detected git worktree. \
+             Skipping hook installation. \
+             Build from the main checkout to install/update hooks."
+        );
         return Ok(());
     }
 
